@@ -65,4 +65,4 @@ class CfWmsPlugin(Plugin):
                     cache,
                 )
 
-            return router
+        return router
