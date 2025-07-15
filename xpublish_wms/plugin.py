@@ -7,6 +7,7 @@ from xpublish import Dependencies, Plugin, hookimpl
 
 from xpublish_wms.query import WMS_FILTERED_QUERY_PARAMS, WMSQuery
 from xpublish_wms.utils import lower_case_keys
+import logfire
 
 from .wms import wms_handler
 
@@ -45,22 +46,23 @@ class CfWmsPlugin(Plugin):
             dataset: xr.Dataset = Depends(deps.dataset),
             cache: cachey.Cache = Depends(deps.cache),
         ):
-            query_params = lower_case_keys(request.query_params)
-            query_keys = list(query_params.keys())
-            extra_query_params = {}
-            for query_key in query_keys:
-                if query_key not in WMS_FILTERED_QUERY_PARAMS:
-                    extra_query_params[query_key] = query_params[query_key]
-                    del query_params[query_key]
+            with logfire.span("WMS: root"):
+                query_params = lower_case_keys(request.query_params)
+                query_keys = list(query_params.keys())
+                extra_query_params = {}
+                for query_key in query_keys:
+                    if query_key not in WMS_FILTERED_QUERY_PARAMS:
+                        extra_query_params[query_key] = query_params[query_key]
+                        del query_params[query_key]
 
-            # TODO: Make threshold configurable
-            return wms_handler(
-                request,
-                wms_query.root,
-                extra_query_params,
-                dataset,
-                self.array_get_map_render_threshold_bytes,
-                cache,
-            )
+                # TODO: Make threshold configurable
+                return wms_handler(
+                    request,
+                    wms_query.root,
+                    extra_query_params,
+                    dataset,
+                    self.array_get_map_render_threshold_bytes,
+                    cache,
+                )
 
-        return router
+            return router
