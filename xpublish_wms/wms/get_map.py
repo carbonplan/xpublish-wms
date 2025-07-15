@@ -2,6 +2,7 @@ import io
 import time
 from datetime import datetime
 from typing import List, Union
+import logfire
 
 import cachey
 import cf_xarray  # noqa
@@ -72,73 +73,74 @@ class GetMap:
         """
         Return the WMS map for the dataset and given parameters
         """
-        # Decode request params
-        try:
-            self.ensure_query_types(ds, query, query_params)
-        except Exception as e:
-            logger.error(f"Error decoding request params: {e}")
-            raise HTTPException(
-                422,
-                "Error decoding request params, please check the request is valid. See the logs for more details.",
-            )
+        with logfire.span("WMS: get_map entry"):
+            # Decode request params
+            try:
+                self.ensure_query_types(ds, query, query_params)
+            except Exception as e:
+                logger.error(f"Error decoding request params: {e}")
+                raise HTTPException(
+                    422,
+                    "Error decoding request params, please check the request is valid. See the logs for more details.",
+                )
 
-        # Select data according to request
-        try:
-            da = self.select_layer(ds)
-        except Exception as e:
-            logger.error(f"Error selecting layer: {e}")
-            raise HTTPException(
-                422,
-                "Error selecting layer, please check the layer name is correct and the dataset has a variable with that name. See the logs for more details.",
-            )
+            # Select data according to request
+            try:
+                da = self.select_layer(ds)
+            except Exception as e:
+                logger.error(f"Error selecting layer: {e}")
+                raise HTTPException(
+                    422,
+                    "Error selecting layer, please check the layer name is correct and the dataset has a variable with that name. See the logs for more details.",
+                )
 
-        try:
-            da = self.select_time(da)
-        except Exception as e:
-            logger.error(f"Error selecting time: {e}")
-            raise HTTPException(
-                422,
-                "Error selecting time, please check the time format is correct and the time dimension exists in the dataset. See the logs for more details.",
-            )
+            try:
+                da = self.select_time(da)
+            except Exception as e:
+                logger.error(f"Error selecting time: {e}")
+                raise HTTPException(
+                    422,
+                    "Error selecting time, please check the time format is correct and the time dimension exists in the dataset. See the logs for more details.",
+                )
 
-        try:
-            da = self.select_elevation(ds, da)
-        except Exception as e:
-            logger.error(f"Error selecting elevation: {e}")
-            raise HTTPException(
-                422,
-                "Error selecting elevation, please check the elevation format is correct and the vertical dimension exists in the dataset. See the logs for more details.",
-            )
+            try:
+                da = self.select_elevation(ds, da)
+            except Exception as e:
+                logger.error(f"Error selecting elevation: {e}")
+                raise HTTPException(
+                    422,
+                    "Error selecting elevation, please check the elevation format is correct and the vertical dimension exists in the dataset. See the logs for more details.",
+                )
 
-        try:
-            da = self.select_custom_dim(da)
-        except Exception as e:
-            logger.error(f"Error selecting custom dimensions: {e}")
-            raise HTTPException(
-                422,
-                "Error selecting custom dimensions, please check all custom selectors are valid and the dimensions exists in the dataset. See the logs for more details.",
-            )
+            try:
+                da = self.select_custom_dim(da)
+            except Exception as e:
+                logger.error(f"Error selecting custom dimensions: {e}")
+                raise HTTPException(
+                    422,
+                    "Error selecting custom dimensions, please check all custom selectors are valid and the dimensions exists in the dataset. See the logs for more details.",
+                )
 
-        # Render the data using the render that matches the dataset type
-        # The data selection and render are coupled because they are both driven by
-        # The grid type for now. This can be revisited if we choose to interpolate or
-        # use the contoured renderer for regular grid datasets
-        image_buffer = io.BytesIO()
-        try:
-            render_result = self.render(ds, da, image_buffer, False)
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            logger.error(f"Error rendering data: {e}")
-            raise HTTPException(
-                422,
-                "Error rendering data, please check the data is valid and the render method is supported for the dataset type. See the logs for more details.",
-            )
+            # Render the data using the render that matches the dataset type
+            # The data selection and render are coupled because they are both driven by
+            # The grid type for now. This can be revisited if we choose to interpolate or
+            # use the contoured renderer for regular grid datasets
+            image_buffer = io.BytesIO()
+            try:
+                render_result = self.render(ds, da, image_buffer, False)
+            except HTTPException as e:
+                raise e
+            except Exception as e:
+                logger.error(f"Error rendering data: {e}")
+                raise HTTPException(
+                    422,
+                    "Error rendering data, please check the data is valid and the render method is supported for the dataset type. See the logs for more details.",
+                )
 
-        if render_result:
-            image_buffer.seek(0)
+            if render_result:
+                image_buffer.seek(0)
 
-        return StreamingResponse(image_buffer, media_type="image/png")
+            return StreamingResponse(image_buffer, media_type="image/png")
 
     def get_minmax(
         self,
@@ -287,37 +289,38 @@ class GetMap:
         :param da:
         :return:
         """
-        # Filter dimension from custom query, if any
-        for dim, value in self.dim_selectors.items():
-            if dim in da.coords:
-                if value is None:
-                    da = da.isel({dim: 0})
-                else:
-                    dtype = da[dim].dtype
-                    method = None
-                    if "timedelta" in str(dtype):
-                        value = pd.to_timedelta(value)
-                    elif np.issubdtype(dtype, np.integer):
-                        value = int(value)
-                        method = "nearest"
-                    elif np.issubdtype(dtype, np.floating):
-                        value = float(value)
-                        method = "nearest"
-                    da = da.sel({dim: value}, method=method)
+        with logfire.span("WMS: select_custom_dim"):
+            # Filter dimension from custom query, if any
+            for dim, value in self.dim_selectors.items():
+                if dim in da.coords:
+                    if value is None:
+                        da = da.isel({dim: 0})
+                    else:
+                        dtype = da[dim].dtype
+                        method = None
+                        if "timedelta" in str(dtype):
+                            value = pd.to_timedelta(value)
+                        elif np.issubdtype(dtype, np.integer):
+                            value = int(value)
+                            method = "nearest"
+                        elif np.issubdtype(dtype, np.floating):
+                            value = float(value)
+                            method = "nearest"
+                        da = da.sel({dim: value}, method=method)
 
-        # Squeeze single value dimensions
-        da = da.squeeze()
+            # Squeeze single value dimensions
+            da = da.squeeze()
 
-        # Squeeze multiple values dimensions, by selecting the last value
-        # for key in da.cf.coordinates.keys():
-        #     if key in ("latitude", "longitude", "X", "Y"):
-        #         continue
+            # Squeeze multiple values dimensions, by selecting the last value
+            # for key in da.cf.coordinates.keys():
+            #     if key in ("latitude", "longitude", "X", "Y"):
+            #         continue
 
-        #     coord = da.cf.coords[key]
-        #     if coord.size > 1:
-        #         da = da.cf.isel({key: -1})
+            #     coord = da.cf.coords[key]
+            #     if coord.size > 1:
+            #         da = da.cf.isel({key: -1})
 
-        return da
+            return da
 
     def render(
         self,
@@ -335,6 +338,7 @@ class GetMap:
         # and then send those values/flags to the next gridded function involved in the render process.
         #
         # ex. if ds.gridded.filter_by_bbox applies the grid mask to da, ds.gridded.project can avoid re-masking by checking the context
+        
         render_context = dict()
 
         filter_start = time.time()
@@ -359,12 +363,13 @@ class GetMap:
             # Filter the data to only include the data within the bbox + buffer so
             # we don't have to render a ton of empty space or pull down more chunks
             # than we need
-            da, render_context = ds.gridded.filter_by_bbox(
-                da,
-                bbox,
-                self.crs,
-                render_context=render_context,
-            )
+            with logfire.span("WMS: filter_by_bbox"):
+                da, render_context = ds.gridded.filter_by_bbox(
+                    da,
+                    bbox,
+                    self.crs,
+                    render_context=render_context,
+                )
 
             filter_success = True
         except Exception as e:
@@ -384,11 +389,12 @@ class GetMap:
 
         projection_start = time.time()
         try:
-            da, render_context = ds.gridded.project(
-                da,
-                self.crs,
-                render_context=render_context,
-            )
+            with logfire.span("WMS: project"):
+                da, render_context = ds.gridded.project(
+                    da,
+                    self.crs,
+                    render_context=render_context,
+                )
         except Exception as e:
             logger.warning(f"Projection failed: {e}")
             if minmax_only:

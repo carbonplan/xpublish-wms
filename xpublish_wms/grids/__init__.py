@@ -3,6 +3,7 @@ from typing import Optional, Sequence, Tuple, Union
 import cf_xarray  # noqa
 import numpy as np
 import xarray as xr
+import logfire
 
 from xpublish_wms.grids.fvcom import FVCOMGrid
 from xpublish_wms.grids.grid import Grid, RenderMethod
@@ -141,15 +142,16 @@ class GridDatasetAccessor:
         render_context: Optional[dict] = dict(),
     ) -> Union[xr.DataArray, xr.Dataset]:
         """Filters the given data array by the given bbox, whose values are based on the give crs"""
-        if self._grid is None:
-            return None
-        else:
-            return self._grid.filter_by_bbox(
-                da,
-                bbox,
-                crs,
-                render_context=render_context,
-            )
+        with logfire.span("WMS: filter_by_bbox (accessor)"):
+            if self._grid is None:
+                return None
+            else:
+                return self._grid.filter_by_bbox(
+                    da,
+                    bbox,
+                    crs,
+                    render_context=render_context,
+                )
 
     def project(
         self,
@@ -157,20 +159,22 @@ class GridDatasetAccessor:
         crs: str,
         render_context: Optional[dict] = dict(),
     ) -> xr.DataArray:
-        if self._grid is None:
-            return None
-        else:
-            return self._grid.project(da, crs, render_context=render_context)
+        with logfire.span("WMS: project (accessor)"):
+            if self._grid is None:
+                return None
+            else:
+                return self._grid.project(da, crs, render_context=render_context)
 
     def tessellate(
         self,
         da: Union[xr.DataArray, xr.Dataset],
         render_context: Optional[dict] = dict(),
     ) -> np.ndarray:
-        if self._grid is None:
-            return None
-        else:
-            return self._grid.tessellate(da, render_context=render_context)
+        with logfire.span("WMS: tessellate (accessor)"):
+            if self._grid is None:
+                return None
+            else:
+                return self._grid.tessellate(da, render_context=render_context)
 
     def sel_lat_lng(
         self,
@@ -179,7 +183,8 @@ class GridDatasetAccessor:
         lat,
         parameters,
     ) -> Tuple[xr.Dataset, list, list]:
-        if self._grid is None:
-            return None
-        else:
-            return self._grid.sel_lat_lng(subset, lng, lat, parameters)
+        with logfire.span("WMS: sel_lat_lng (accessor)"):
+            if self._grid is None:
+                return None
+            else:
+                return self._grid.sel_lat_lng(subset, lng, lat, parameters)
