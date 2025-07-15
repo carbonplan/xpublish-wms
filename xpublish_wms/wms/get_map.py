@@ -342,192 +342,217 @@ class GetMap:
         #
         # ex. if ds.gridded.filter_by_bbox applies the grid mask to da, ds.gridded.project can avoid re-masking by checking the context
         with logfire.span("WMS: render"):
-            
             render_context = dict()
 
-            filter_start = time.time()
-            filter_success = False
-            try:
-                # Grab a buffer around the bbox to ensure we have enough data to render
-                x_buffer = (
-                    abs(max(self.bbox[0], self.bbox[2]) - min(self.bbox[0], self.bbox[2]))
-                    * 0.15
-                )
-                y_buffer = (
-                    abs(max(self.bbox[1], self.bbox[3]) - min(self.bbox[1], self.bbox[3]))
-                    * 0.15
-                )
-                bbox = [
-                    self.bbox[0] - x_buffer,
-                    self.bbox[1] - y_buffer,
-                    self.bbox[2] + x_buffer,
-                    self.bbox[3] + y_buffer,
-                ]
-
-                # Filter the data to only include the data within the bbox + buffer so
-                # we don't have to render a ton of empty space or pull down more chunks
-                # than we need
-                with logfire.span("WMS: filter_by_bbox"):
-                    da, render_context = ds.gridded.filter_by_bbox(
-                        da,
-                        bbox,
-                        self.crs,
-                        render_context=render_context,
-                    )
-
-                filter_success = True
-            except Exception as e:
-                logger.error(f"Error filtering data within bbox: {e}")
-                logger.warning("Falling back to full layer")
-
+            with logfire.span("bbox: buffer calculation"):
+                filter_start = time.time()
                 filter_success = False
-            logger.debug(f"WMS GetMap BBOX filter time: {time.time() - filter_start}")
+                try:
+                    x_buffer = (
+                        abs(
+                            max(self.bbox[0], self.bbox[2])
+                            - min(self.bbox[0], self.bbox[2])
+                        )
+                        * 0.15
+                    )
+                    y_buffer = (
+                        abs(
+                            max(self.bbox[1], self.bbox[3])
+                            - min(self.bbox[1], self.bbox[3])
+                        )
+                        * 0.15
+                    )
+                    bbox = [
+                        self.bbox[0] - x_buffer,
+                        self.bbox[1] - y_buffer,
+                        self.bbox[2] + x_buffer,
+                        self.bbox[3] + y_buffer,
+                    ]
+
+                    with logfire.span("WMS: filter_by_bbox"):
+                        da, render_context = ds.gridded.filter_by_bbox(
+                            da,
+                            bbox,
+                            self.crs,
+                            render_context=render_context,
+                        )
+
+                    filter_success = True
+                except Exception as e:
+                    logger.error(f"Error filtering data within bbox: {e}")
+                    logger.warning("Falling back to full layer")
+                    filter_success = False
+                logger.debug(f"WMS GetMap BBOX filter time: {time.time() - filter_start}")
 
             # if filter_by_bbox was successful, preload data for projection
             if filter_success:
-                filter_load_time = time.time()
-                da = da.load()
+                with logfire.span("WMS: load filtered data"):
+                    filter_load_time = time.time()
+                    da = da.load()
+                    logger.debug(
+                        f"WMS GetMap load filtered data: {time.time() - filter_load_time}",
+                    )
+
+            with logfire.span("WMS: project+projection+postproc"):
+                projection_start = time.time()
+                try:
+                    with logfire.span("WMS: project"):
+                        da, render_context = ds.gridded.project(
+                            da,
+                            self.crs,
+                            render_context=render_context,
+                        )
+                except Exception as e:
+                    logger.warning(f"Projection failed: {e}")
+                    if minmax_only:
+                        logger.warning("Falling back to default minmax")
+                        return {"min": float(da.min()), "max": float(da.max())}
+
+                with logfire.span("WMS: squeeze"):
+                    da = da.squeeze()
                 logger.debug(
-                    f"WMS GetMap load filtered data: {time.time() - filter_load_time}",
+                    f"WMS GetMap Projection time: {time.time() - projection_start}"
                 )
 
-            projection_start = time.time()
-            try:
-                with logfire.span("WMS: project"):
-                    da, render_context = ds.gridded.project(
-                        da,
-                        self.crs,
-                        render_context=render_context,
-                    )
-            except Exception as e:
-                logger.warning(f"Projection failed: {e}")
-                if minmax_only:
-                    logger.warning("Falling back to default minmax")
-                    return {"min": float(da.min()), "max": float(da.max())}
-
-            # Squeeze single value dimensions
-            da = da.squeeze()
-            logger.debug(f"WMS GetMap Projection time: {time.time() - projection_start}")
-
-            # Print the size of the da in megabytes
-            da_size = da.nbytes
-            if da_size > self.array_render_threshold_bytes:
-                logger.error(
-                    f"DataArray size is {da_size:.2f} bytes, which is larger than the "
-                    f"threshold of {self.array_render_threshold_bytes} bytes. "
-                    f"Consider increasing the threshold in the plugin configuration.",
-                )
-                raise HTTPException(
-                    413,
-                    f"DataArray too large to render: threshold is {self.array_render_threshold_bytes} bytes, data is {da_size:.2f} bytes",
-                )
-            logger.debug(f"WMS GetMap loading DataArray size: {da_size:.2f} bytes")
-
-            start_dask = time.time()
-            da = da.load()
-            logger.debug(f"WMS GetMap load full data: {time.time() - start_dask}")
-
-            if da.size == 0:
-                logger.warning("No data to render")
-                return False
-
-            if minmax_only:
-                try:
-                    return {
-                        "min": float(np.nanmin(da)),
-                        "max": float(np.nanmax(da)),
-                    }
-                except Exception as e:
+            with logfire.span("WMS: check DataArray size"):
+                da_size = da.nbytes
+                if da_size > self.array_render_threshold_bytes:
                     logger.error(
-                        f"Error computing minmax: {e}, falling back to full layer minmax",
+                        f"DataArray size is {da_size:.2f} bytes, which is larger than the "
+                        f"threshold of {self.array_render_threshold_bytes} bytes. "
+                        f"Consider increasing the threshold in the plugin configuration.",
                     )
-                    return {"min": float(da.min()), "max": float(da.max())}
-
-            if not self.autoscale:
-                span = (self.colorscalerange[0], self.colorscalerange[1])
-            else:
-                span = None
-
-            start_mesh = time.time()
-            cvs = dsh.Canvas(
-                plot_height=self.height,
-                plot_width=self.width,
-                x_range=(self.bbox[0], self.bbox[2]),
-                y_range=(self.bbox[1], self.bbox[3]),
-            )
-
-            # numba only supports float32 and float64. Cast everything else
-            if da.dtype.kind == "f" and da.dtype.itemsize != 4 and da.dtype.itemsize != 8:
-                logger.warning(
-                    f"DataArray dtype is {da.dtype}, which is not a floating point type "
-                    f"of size 32 or 64. This will result in a slow render.",
-                )
-                if da.dtype.itemsize < 4:
-                    logger.warning(
-                        "DataArray dtype is 16-bit. This must be converted to 32-bit before rendering.",
+                    raise HTTPException(
+                        413,
+                        f"DataArray too large to render: threshold is {self.array_render_threshold_bytes} bytes, data is {da_size:.2f} bytes",
                     )
-                    da = da.astype(np.float32)
-                elif da.dtype.itemsize < 8:
-                    logger.warning(
-                        "DataArray dtype is 32-bit. This must be converted to 64-bit before rendering.",
-                    )
-                    da = da.astype(np.float64)
+                logger.debug(f"WMS GetMap loading DataArray size: {da_size:.2f} bytes")
+
+            with logfire.span("WMS: load full data"):
+                start_dask = time.time()
+                da = da.load()
+                logger.debug(f"WMS GetMap load full data: {time.time() - start_dask}")
+
+            with logfire.span("WMS: handle empty data/minmax"):
+                if da.size == 0:
+                    logger.warning("No data to render")
+                    return False
+
+                if minmax_only:
+                    try:
+                        return {
+                            "min": float(np.nanmin(da)),
+                            "max": float(np.nanmax(da)),
+                        }
+                    except Exception as e:
+                        logger.error(
+                            f"Error computing minmax: {e}, falling back to full layer minmax",
+                        )
+                        return {"min": float(da.min()), "max": float(da.max())}
+
+            with logfire.span("WMS: set color span"):
+                if not self.autoscale:
+                    span = (self.colorscalerange[0], self.colorscalerange[1])
                 else:
-                    raise ValueError(
+                    span = None
+
+            with logfire.span("WMS: mesh construction"):
+                start_mesh = time.time()
+                cvs = dsh.Canvas(
+                    plot_height=self.height,
+                    plot_width=self.width,
+                    x_range=(self.bbox[0], self.bbox[2]),
+                    y_range=(self.bbox[1], self.bbox[3]),
+                )
+
+                # numba only supports float32 and float64. Cast everything else
+                if (
+                    da.dtype.kind == "f"
+                    and da.dtype.itemsize != 4
+                    and da.dtype.itemsize != 8
+                ):
+                    logger.warning(
                         f"DataArray dtype is {da.dtype}, which is not a floating point type "
-                        f"greater than 64-bit. This is not currently supported.",
+                        f"of size 32 or 64. This will result in a slow render.",
                     )
+                    if da.dtype.itemsize < 4:
+                        logger.warning(
+                            "DataArray dtype is 16-bit. This must be converted to 32-bit before rendering.",
+                        )
+                        da = da.astype(np.float32)
+                    elif da.dtype.itemsize < 8:
+                        logger.warning(
+                            "DataArray dtype is 32-bit. This must be converted to 64-bit before rendering.",
+                        )
+                        da = da.astype(np.float64)
+                    else:
+                        raise ValueError(
+                            f"DataArray dtype is {da.dtype}, which is not a floating point type "
+                            f"greater than 64-bit. This is not currently supported.",
+                        )
 
-            if ds.gridded.render_method == RenderMethod.Raster:
-                mesh = cvs.raster(
-                    da,
+                with logfire.span(f"WMS: mesh render_method={ds.gridded.render_method}"):
+                    if ds.gridded.render_method == RenderMethod.Raster:
+                        mesh = cvs.raster(
+                            da,
+                        )
+                    elif ds.gridded.render_method == RenderMethod.Quad:
+                        try:
+                            mesh = cvs.quadmesh(
+                                da,
+                                x="x",
+                                y="y",
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Error rendering quadmesh: {e}, falling back to raster"
+                            )
+                            mesh = cvs.raster(
+                                da,
+                            )
+                    elif ds.gridded.render_method == RenderMethod.Triangle:
+                        triangles, render_context = ds.gridded.tessellate(
+                            da,
+                            render_context=render_context,
+                        )
+
+                        # TODO - maybe this discrepancy between coloring by verts v tris should be part of the grid?
+                        if "tri_x" in render_context and "tri_y" in render_context:
+                            # We are coloring the triangles by the data values
+                            verts = pd.DataFrame(
+                                {
+                                    "x": render_context["tri_x"],
+                                    "y": render_context["tri_y"],
+                                },
+                            )
+                            tris = pd.DataFrame(
+                                triangles.astype(int), columns=["v0", "v1", "v2"]
+                            )
+                            tris = tris.assign(z=da.values)
+                        else:
+                            # We are coloring the vertices by the data values
+                            verts = pd.DataFrame({"x": da.x, "y": da.y, "z": da})
+                            tris = pd.DataFrame(
+                                triangles.astype(int), columns=["v0", "v1", "v2"]
+                            )
+
+                        mesh = cvs.trimesh(
+                            verts,
+                            tris,
+                        )
+                logger.debug(f"WMS GetMap Mesh time: {time.time() - start_mesh}")
+
+            with logfire.span("WMS: shade and encode image"):
+                custom_palettename = self.palettename.split(",")
+                start_shade = time.time()
+                shaded = tf.shade(
+                    mesh,
+                    cmap=custom_palettename,  # @matplotlib.colormaps.get_cmap(self.palettename),
+                    how="linear",
+                    span=span,
                 )
-            elif ds.gridded.render_method == RenderMethod.Quad:
-                try:
-                    mesh = cvs.quadmesh(
-                        da,
-                        x="x",
-                        y="y",
-                    )
-                except Exception as e:
-                    logger.warning(f"Error rendering quadmesh: {e}, falling back to raster")
-                    mesh = cvs.raster(
-                        da,
-                    )
-            elif ds.gridded.render_method == RenderMethod.Triangle:
-                triangles, render_context = ds.gridded.tessellate(
-                    da,
-                    render_context=render_context,
-                )
+                logger.debug(f"WMS GetMap Shade time: {time.time() - start_shade}")
 
-                # TODO - maybe this discrepancy between coloring by verts v tris should be part of the grid?
-                if "tri_x" in render_context and "tri_y" in render_context:
-                    # We are coloring the triangles by the data values
-                    verts = pd.DataFrame(
-                        {"x": render_context["tri_x"], "y": render_context["tri_y"]},
-                    )
-                    tris = pd.DataFrame(triangles.astype(int), columns=["v0", "v1", "v2"])
-                    tris = tris.assign(z=da.values)
-                else:
-                    # We are coloring the vertices by the data values
-                    verts = pd.DataFrame({"x": da.x, "y": da.y, "z": da})
-                    tris = pd.DataFrame(triangles.astype(int), columns=["v0", "v1", "v2"])
-
-                mesh = cvs.trimesh(
-                    verts,
-                    tris,
-                )
-            logger.debug(f"WMS GetMap Mesh time: {time.time() - start_mesh}")
-            custom_palettename = self.palettename.split(',')
-            start_shade = time.time()
-            shaded = tf.shade(
-                mesh,
-                cmap=custom_palettename,#@matplotlib.colormaps.get_cmap(self.palettename),
-                how="linear",
-                span=span,
-            )
-            logger.debug(f"WMS GetMap Shade time: {time.time() - start_shade}")
-
-            im = shaded.to_pil()
-            im.save(buffer, format="PNG")
+                im = shaded.to_pil()
+                im.save(buffer, format="PNG")
             return True
